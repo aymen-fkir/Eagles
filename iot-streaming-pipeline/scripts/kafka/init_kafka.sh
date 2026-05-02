@@ -5,8 +5,10 @@ BOOTSTRAP_SERVER="kafka:9092"
 PARTITIONS=4
 REPLICATION_FACTOR=1
 
+PREFIX="factory.line1.telemetry"
+
 # List of topics to create
-TOPICS=("sensor.group.alpha" "sensor.group.beta" "telemetry.errors")
+TOPICS=("$PREFIX.valve" "$PREFIX.gaz")
 
 echo "⏳ Waiting for Kafka to be ready at $BOOTSTRAP_SERVER..."
 

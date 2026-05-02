@@ -1,0 +1,11 @@
+[project]
+name = "processor"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "confluent-kafka>=2.14.0",
+    "influxdb-client>=1.50.0",
+    "paho-mqtt>=2.1.0",
+]

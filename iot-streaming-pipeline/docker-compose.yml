@@ -1,32 +1,31 @@
 services:
-  # 1. The MQTT Broker
+
+  # ── 1. MQTT Broker ───────────────────────────────────────────────────────────
   mosquitto:
-    image: eclipse-mosquitto:latest
+    image: eclipse-mosquitto:openssl
     container_name: mosquitto
     ports:
       - "1883:1883"
+      - "8883:8883"
     volumes:
-      - ./scripts/mqtt/mosquitto.conf:/mosquitto/config/mosquitto.conf
-      - ./scripts/mqtt/data:/mosquitto/data
+      - ./scripts/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./scripts/mosquitto/certs:/mosquitto/config/certs
+      - mosquitto_data:/mosquitto/data
     networks:
       - iot_network
-    restart: always
 
-  # 2. Kafka 4.2.0 (KRaft Mode - No Zookeeper)
+  # ── 2. Kafka (KRaft, no Zookeeper) ──────────────────────────────────────────
   kafka:
-    image: apache/kafka:4.0.0 # Note: Ensure the tag exists, or use 'latest'
+    image: apache/kafka:4.0.0
     container_name: kafka
     environment:
-      # KRaft Settings
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: 'broker,controller'
       KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093'
       KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
-      # Listeners
       KAFKA_LISTENERS: 'PLAINTEXT://:9092,CONTROLLER://:9093'
       KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:9092'
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT'
-      # Cluster ID is required for KRaft (Can be any UUID-style string)
       KAFKA_CLUSTER_ID: '4L6GNCw-S7u4p96pS6v6_g'
     networks:
       - iot_network
@@ -36,7 +35,7 @@ services:
       timeout: 5s
       retries: 10
 
-  # 3. Kafka Topic Initializer
+  # ── 3. Kafka Topic Initializer ───────────────────────────────────────────────
   kafka-setup:
     image: apache/kafka:4.0.0
     depends_on:
@@ -48,7 +47,7 @@ services:
     networks:
       - iot_network
 
-  # 4. The Python Ingestor
+  # ── 4. MQTT → Kafka Ingestor ─────────────────────────────────────────────────
   ingestor:
     build:
       context: ./ingestor
@@ -61,8 +60,85 @@ services:
         condition: service_started
     env_file:
       - .env
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - MQTT_HOST=mosquitto
+      - MQTT_PORT=1883
     networks:
       - iot_network
+
+  # ── 5. InfluxDB ──────────────────────────────────────────────────────────────
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUX_USER:-admin}
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUX_PASSWORD:-adminpassword}
+      - DOCKER_INFLUXDB_INIT_ORG=${INFLUX_ORG:-myorg}
+      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUX_BUCKET:-iot_factory}
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUX_TOKEN:-my-super-secret-token}
+      - DOCKER_INFLUXDB_INIT_RETENTION=30d
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+    networks:
+      - iot_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  # ── 6. InfluxDB Schema Initializer ──────────────────────────────────────────
+  influx-setup:
+    image: influxdb:2.7
+    container_name: influx-setup
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    volumes:
+      - ./scripts/influx/script.sh:/usr/local/bin/influx_setup.sh
+    entrypoint: ["/bin/bash", "/usr/local/bin/influx_setup.sh"]
+    environment:
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_TOKEN=${INFLUX_TOKEN:-my-super-secret-token}
+      - INFLUX_ORG=${INFLUX_ORG:-myorg}
+      - INFLUX_BUCKET=${INFLUX_BUCKET:-iot_factory}
+    networks:
+      - iot_network
+    restart: "no"   # run once and exit
+
+  # ── 7. Kafka → InfluxDB Consumers ───────────────────────────────────────────
+  consumers:
+    build:
+      context: ./processor
+      dockerfile: DockerFile
+    container_name: consumers
+    depends_on:
+      kafka:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+      influx-setup:
+        condition: service_completed_successfully
+      kafka-setup:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_TOKEN=${INFLUX_TOKEN:-my-super-secret-token}
+      - INFLUX_ORG=${INFLUX_ORG:-myorg}
+      - INFLUX_BUCKET=${INFLUX_BUCKET:-iot_factory}
+    volumes:
+      - consumer_logs:/app/logs
+    networks:
+      - iot_network
+    restart: on-failure
 
 networks:
   iot_network:
@@ -70,3 +146,6 @@ networks:
 
 volumes:
   mosquitto_data:
+  influxdb_data:
+  influxdb_config:
+  consumer_logs:
